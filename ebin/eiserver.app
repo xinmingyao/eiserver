@@ -1,0 +1,9 @@
+{application,eiserver,
+             [{description,[]},
+              {vsn,"1"},
+              {registered,[]},
+              {applications,[kernel,stdlib]},
+              {mod,{eiserver_app,[]}},
+              {env,[]},
+              {modules,[aac,eis_agent,eis_ice,eiserver_app,eiserver_sup,h264,
+                        sdp,sdp_encoder,sdp_tests]}]}.
