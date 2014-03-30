@@ -5,7 +5,8 @@
 -include("rtp.hrl").
 -include("rtcp.hrl").
 -include("srtp.hrl").
-
+-include("sdp.hrl").
+-include("media_info.hrl").
 %%ice see 
 
 -define(SUTN_USAGE_ICE_COMPATIBILITY_RFC5245,0).
@@ -42,20 +43,20 @@
 -define(RELAY_TYPE_TURN_TCP,0).
 -define(RELAY_TYPE_TURN_TLS,0).
 -record(ice_address,{ip,port,type=udp,cid::component_id}).
--record(turn_server,{ip,port,username,password,type=udp}).
+-record(turn_server,{ip,port,user,pwd,type=udp}).
 -record(candidate,{
 	  id,
 	  type,
-	  transport,
+	  transport=udp,
 		   addr,
 		   base_addr,
 		   priority,
 		   stream_id,
 		   component_id,
 		   foundation,
-		   username,
-		   password,
-		   turn_servers,
+		   user,
+		   pwd,
+		   turn_server,
 		   socket
 		  }).
 
@@ -72,12 +73,6 @@
 -define(AGENT_NOMINATE_REGULAR,regular).
 -define(AGENT_NOMINATE_AGGRESSIVE,aggressive).
 
-
-
-
-
-
-
 -record(candidate_checkpair,{
 	  agent,
 	  stream_id,
@@ -93,8 +88,9 @@
 	  next_tick,
 	  stun_msg
 	 }).
-
-
+-record(agent_video,{port,attrs}.
+-record(agent_audio,{port,attrs}.
+-record(agent_info,{media::#media_info{},hosts,stun_servers}).
 
 
 

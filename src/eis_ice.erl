@@ -21,12 +21,12 @@ candidate_ice_priority_full(TypePreference,LocalPreference,ComponentId)->
     16#1000000 * TypePreference +
 	16#100 * LocalPreference +
 	16#100 - ComponentId.
-candiate_pair_priority(Local,Remote)->
+candiate_pair_priority(Controlling,Controlled)->
     {Max,Min,Value} = 
-	if Local > Remote ->
-		{Local,Remote,1}; 
+	if Controlling > Controlled ->
+		{Controlling,Remote,1}; 
 	   ture ->
-		{Remote,Local,0}
+		{Controlled,Controlling,0}
 	end,
     1 bsl 32 * Min + 2 * Max + Value.
 
