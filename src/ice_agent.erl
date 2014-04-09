@@ -419,9 +419,9 @@ rtcp_info(MediaInfo)->
 ;
 	
 
-?AGENT_RUNNING(From,{udp,Socket,PeerIp,PeerPort,#stun{class = binding,
+?AGENT_RUNNING(_From,{udp,Socket,PeerIp,PeerPort,#stun{class = binding,
 						      transactionid = TxId,
-						      method=request,attrs=Attrs}  },Server) ->
+						      method=request,attrs=Attrs}  },#server{role=Role}) ->
 	  
     {ok,Ip} = inet_parse:address(PeerIp),
     RepAttrs = [{'XOR-PEER-ADDRESS',{Ip,PeerPort}}],
@@ -460,14 +460,32 @@ rtcp_info(MediaInfo)->
 			      T2 = get(?REMOTE),
 			      T3 = [C1|T2],
 			      put(?REMOTE,T3),
-			      Pair = #checkpair{sid=Sid,cid=Cid,remote=C1,local=Local},
+			      PairPrority =
+				  case Role of
+				      ?ROLE_CONTROLLING ->
+					  eis_ice:candiate_pair_priority(Local#candidate.priority,Priority);
+				      ?ROLE_CONTROLLED ->
+					  eis_ice:candiate_pair_priority(Priority,Local#candidate.priority)
+				  end,
+			      Pair = #checkpair{priority=PairPrority,sid=Sid,cid=Cid,remote=C1,local=Local,state=?CANDIDATE_WAITING},
+			      insert_checkpair(Sid,Pair,Role),
 			      L2 = get(?TRIGGER_QUE),
 			      L3 = L2 ++ [Pair],
 			      put(?TRIGGER_QUE,L3),
 			      C1 end,Streams);
-	[H|_]->
-	    H
-    end,
+	_->%%7.2.1.4
+	    lists:map(fun(#checkpair{state=State1,id=Id}=Pair)->
+			      case State1 of
+				  ?CANDIDATE_SUCCEEDED ->
+				      do_nothing;
+				  A when A=:= ?CANDIDATE_WAITING orelse A=:=?CANDIDATE_FROZEN ->
+				      append_trigger_que(Pair);
+				  ?CANDIDATE_FAILED ->
+				      ok;
+				  ?CANDIDATE_IN_PROGRESS ->
+				      ok
+			      end end,T1)
+		      end,
     nochange.
 
 ?AGENT_COMPLETED(From,{send,udp,Sid,Cid,Packet},_Server)->
@@ -1010,7 +1028,13 @@ checklist_type(L)->
 	    active
     end.
 		
-
+insert_checkpair(Sid,Pair,Role)->
+    L1 = get(?CHECK_LIST),
+    {_,L2} = proplists:get_value(Sid,L1),
+    L3 = [L2|L1],
+    L4 = order_pair(L3,Role),
+    L5=lists:keyreplace(Sid,1,L1,{Sid,L4}),
+    put(?CHECK_LIST,L5).
 update_same_foundation_frozen_2_waiting(Sid,Fid,L)->
     L1 = get(?CHECK_LIST),
     L2 = lists:map(fun(#checkpair{fid=F1,state=State}=A)->
