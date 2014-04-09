@@ -3,7 +3,7 @@
 -compile([export_all]).
 candidate_ice_priority(Candidate)->
     Type = Candidate#candidate.type,
-    CId = Candidate#candidate.component_id,
+    CId = Candidate#candidate.cid,
     TypeRef = 
 	case Type of
 	    ?CANDIDATE_TYPE_HOST ->
@@ -24,7 +24,7 @@ candidate_ice_priority_full(TypePreference,LocalPreference,ComponentId)->
 candiate_pair_priority(Controlling,Controlled)->
     {Max,Min,Value} = 
 	if Controlling > Controlled ->
-		{Controlling,Remote,1}; 
+		{Controlling,Controlled,1}; 
 	   ture ->
 		{Controlled,Controlling,0}
 	end,

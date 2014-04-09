@@ -42,23 +42,23 @@
 -define(RELAY_TYPE_TURN_UDP,0).
 -define(RELAY_TYPE_TURN_TCP,0).
 -define(RELAY_TYPE_TURN_TLS,0).
--record(ice_address,{ip,port,type=udp,cid::component_id}).
+-record(ice_addr,{ip,port,type=udp,cid::component_id}).
 -record(turn_server,{ip,port,user,pwd,type=udp}).
 -record(candidate,{
 	  id,
 	  type,
 	  transport=udp,
-		   addr,
-		   base_addr,
-		   priority,
-		   stream_id,
-		   component_id,
-		   foundation,
-		   user,
-		   pwd,
-		   turn_server,
-		   socket
-		  }).
+	  addr,
+	  base_addr,
+	  priority,
+	  sid,
+	  cid,
+	  fid,
+	  user,
+	  pwd,
+	  server::#turn_server{},
+	  socket
+	 }).
 
 -define(CHECK_WAITING,1).
 -define(CHECK_IN_PROGRESS,2).
@@ -73,13 +73,14 @@
 -define(AGENT_NOMINATE_REGULAR,regular).
 -define(AGENT_NOMINATE_AGGRESSIVE,aggressive).
 
--record(candidate_checkpair,{
+-record(checkpair,{
+	  id,
 	  agent,
-	  stream_id,
-	  component_id,
+	  sid,
+	  cid,
 	  local,
 	  remote,
-	  foundation,
+	  fid,
 	  state,
 	  is_nominated,
 	  is_controlling,
