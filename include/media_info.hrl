@@ -18,9 +18,9 @@
 -type(audio_params() :: #audio_params{}).
 
 -record(stream_info, {
-  content        = undefined ::frame_content(),
+  content        = undefined ::frame_content,
 	stream_id      = 0         ::non_neg_integer(),
-  codec 	       = undefined ::frame_codec()|undefined,
+  codec 	       = undefined ::frame_codec|undefined,
   config         = undefined ::stream_decoder_config(),
   bitrate        = undefined ::non_neg_integer(),
   language       = undefined ::string()|undefined,

@@ -89,8 +89,6 @@
 	  next_tick,
 	  stun_msg
 	 }).
--record(agent_video,{port,attrs}.
--record(agent_audio,{port,attrs}.
 -record(agent_info,{media::#media_info{},hosts,stun_servers}).
 
 

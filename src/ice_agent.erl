@@ -50,7 +50,6 @@ info(Pid,Msg,Time)->
 -record(socket_info,{ip,port,type,streams=[]}).
 -record(checklist_info,{sid,timer,state}).
 -record(check_rto_info,{sid,timer,count,pair}).
-
 -record(server, {
 	  fsm::any(),
 	  agent_state,
@@ -73,8 +72,9 @@ info(Pid,Msg,Time)->
 -define(PAIR_ID,pair_id).
 -define(GATHER_QUE,gather_que).
 -define(TIE_BREAKER,tie_breaker).
--define(CHECK_LIST,check_list).
--define(VALIDE_LIST,valid_list).
+-define(CHECKLISTS,checklists).
+-define(VALIDLIST_DICT,validlist_dict).
+
 -define(TRIGGER_QUE,trigger_que).
 -define(TA_TIMER,ta_timer).
 -define(SOCKET_DICT,socket_dict).
@@ -86,12 +86,11 @@ info(Pid,Msg,Time)->
 -define(REMOTE,remote).
 -define(LOCAL_SDP,sdp).
 -define(DEFAULT,default).
-
 %%re send time dict
 -define(GATHER_RTO_DICT,gather_rto_dict).
 -define(CHECK_RTO_DICT,check_rto_dict).
--define(STUN_REQ_TRANS,stun_req_trans).
-
+-define(GATHER_REQ_DICT,gather_req_dict).
+-define(CHECK_REQ_DICT,check_req_dict).
 -define(ROLE_CONTROLLING,controlling).
 -define(ROLE_CONTROLLED,controlled).
 -define(CANDIDATE_FROZEN,frozen).
@@ -104,11 +103,8 @@ info(Pid,Msg,Time)->
 -define(CHECKLIST_RUNNING,checklist_running).
 -define(CHECKLIST_COMPLETED,checklist_completed).
 -define(CHECKLIST_FAILED,checklist_failed).
-
 -define(CHECKLIST_STATE_DICT,checklist_state_dict).
-
-
-
+-define(PAIR_NOMINATED_DICT,pair_nominated_dict). %%for controlled agent,save pair is nominated by req
 
 %%%===================================================================
 %%% API
@@ -123,7 +119,6 @@ info(Pid,Msg,Time)->
 %%--------------------------------------------------------------------
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -139,8 +134,7 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Opts]) ->
-    
+init([Opts]) ->    
     Server=#server{opts=Opts,hosts=pcall(hosts,Opts),turn_servers=pcall(turn_servers,Opts)},
     {ok, #state{server=Server,fsm=?AGENT_INIT}}.
 
@@ -220,7 +214,7 @@ reply({To,Tag},Reply)->
 
 -spec rtcp_info(MediaInfo::sdp)->
 		       no_rctp|rtcp|mux.
-rtcp_info(MediaInfo)->
+rtcp_info(_MediaInfo)->
     mux.
 
 ?AGENT_INIT(From,{'action',Action,MediaInfo},#server{hosts=Ips}=Server) 
@@ -240,10 +234,10 @@ rtcp_info(MediaInfo)->
     {Timer,Count} = dict_find(?GATHER_RTO_DICT,Id),
     if Count >1 ->
 	    %%stop and next candidate
-	    info(self(),gather,?Ta),
+	    msg_after(?Ta,gather),
 	    ok;
-	ture->
-	    {ok,Timer} = timer:send_after(?Ta,self(),{'$agent',from,{gather_rto,Id,{S,Ip,Port,Stun}}}),
+       true->
+	    {ok,Timer} = msg_after(?Ta,{gather_rto,Id,{S,Ip,Port,Stun}}),
 	    dict_store(?GATHER_RTO_DICT,Id,{Timer,Count+1}),
 	    gen_udp:send(S,Ip,Port,Stun)
     end,
@@ -260,7 +254,7 @@ rtcp_info(MediaInfo)->
 	    Ts = lists:nth(1,TS),
 	    #turn_server{ip=Ip,port=Port}= Ts,
 	    Id = increment(?TXID),
-	    dict_store(?STUN_REQ_TRANS,Id,Candidate#candidate{server=Ts}),
+	    dict_store(?GATHER_REQ_DICT,Id,Candidate#candidate{server=Ts}),
 	    Req = #stun{
 	      class = request,
 	      method = binding,
@@ -270,14 +264,14 @@ rtcp_info(MediaInfo)->
 	     },
 	    Stun = stun:encode(Req),
 	    gen_udp:send(S,Ip,Port,Stun),
-	    {ok,Timer} = timer:send_after(?Ta,self(),{'$agent',from,{gather_rto,Id,{S,Ip,Port,Stun}}}),
+	    {ok,Timer} = send_interval(?Ta,self(),{gather_rto,Id,{S,Ip,Port,Stun}}),
 	    dict_store(?GATHER_RTO_DICT,Id,{Timer,1}),
 	    put(?GATHER_QUE,Tail),
 	    info(self(),gather,?Ta),
 	    nochange
     end;
 ?AGENT_GATHER(_From,#stun{class=success,attrs=Attrs,transactionid=TxId},_Server) ->
-    case dict_find(?STUN_REQ_TRANS,TxId) of
+    case dict_find(?GATHER_REQ_DICT,TxId) of
 	{ok,Host}->	    
 	    {Timer,_Count} = dict_find(?GATHER_RTO_DICT,TxId),
 	    timer:cancel(Timer),
@@ -313,9 +307,10 @@ rtcp_info(MediaInfo)->
     {ok,#check_rto_info{pair=Pair,timer=Ref,count=Count}=Info}=dict_find(?CHECK_RTO_DICT,Sid),
     if Count >=2 ->
 	    Id = Pair#checkpair.id,
-	    update_checklist_state(Sid,Id,?CANDIDATE_FAILED),
+	    update_pair_state(Sid,Id,?CANDIDATE_FAILED),
 	    timer:cancel(Ref),
-	    case do_check_false() of
+	    update_checklist_state(Sid),
+	    case do_check_failed() of
 		true->
 		    reply(Client,{false,check_failed});
 		_->
@@ -324,9 +319,9 @@ rtcp_info(MediaInfo)->
 	    {Server,?AGENT_FAILED};
        true->
 	    gen_udp:send(Socket,Ip,Port,Stun),   
-	    dict_store(?CHECK_RTO_DICT,Sid,Info#check_rto_info{count=Count+1})
-    end,
-    nochange
+	    dict_store(?CHECK_RTO_DICT,Sid,Info#check_rto_info{count=Count+1}),
+	    nochange
+    end
     ;
 ?AGENT_RUNNING(_From,{check,Id},#server{nominate_type=_Type}=Server) ->
     
@@ -343,26 +338,26 @@ rtcp_info(MediaInfo)->
 ?AGENT_RUNNING(_From
 	       ,{udp,_Socket,_PeerIp,_PeerPort,#stun{class = error,attrs=_Attrs,transactionid=TxId}}
 	       ,Server) ->
-    case dict_find(?STUN_REQ_TRANS,TxId) of
+    case dict_find(?CHECK_REQ_DICT,TxId) of
 	error->
 	    nochange;
 	{ok,#check_info{sid=ListId,pair=Pair,role=Role}}->
 	    #checkpair{id=Id}=Pair,
 	    %%7.1.3.1
 	    %% change_checklist_priority,
-	    L = get(?CHECK_LIST),
+	    L= get(?CHECKLISTS),
 	    L2 = lists:map(fun({T1,T2})->
 				   {T1,order_pair(T2,not_role(Role))} end ,L),
-	    put(?CHECK_LIST,L2),
-	    update_checklist_state(ListId,Id,?CANDIDATE_WAITING),
+	    put(?CHECKLISTS,L2),
+	    update_pair_state(ListId,Id,?CANDIDATE_WAITING),
 	    L1 =get(?TRIGGER_QUE),
 	    put(?TRIGGER_QUE,L1++[#trigger{pair=Pair,sid=ListId}]),
 	    {Server#server{role=not_role(Role)},?AGENT_RUNNING}
     end;
 ?AGENT_RUNNING(_From
 	       ,{udp,_Socket,PeerIp,PeerPort,#stun{class = success,attrs=Attrs,transactionid=TxId}}
-	       ,#server{client=Client}=Server) ->
-    case dict_find(?STUN_REQ_TRANS,TxId) of
+	       ,#server{client=Client,role=Role,nominate_type=Type}=Server) ->
+    case dict_find(?CHECK_REQ_DICT,TxId) of
 	error->
 	    nochange;
 	{ok,#check_info{pair=#checkpair{id=Id,local =Local,remote=Remote,
@@ -377,7 +372,17 @@ rtcp_info(MediaInfo)->
 	    ValidPair = 
 	    case {LocalIp,LocalPort} of
 		{PeerFlexIp,PeerFlexPort} ->
-		    Pair;
+		    case Role of 
+			?ROLE_CONTROLLED->
+			    case dict_find(?PAIR_NOMINATED_DICT,Id) of
+				{ok,_}->			    
+				    Pair#checkpair{is_nominated=true};
+				_->
+				    Pair
+			    end;
+			?ROLE_CONTROLLING->
+			    Pair
+		    end;
 		_-> 
 		    #candidate{base_addr=Base} = Local,
 		    NewAddr = #ice_addr{ip=PeerFlexIp,port=PeerFlexPort},
@@ -400,29 +405,41 @@ rtcp_info(MediaInfo)->
 		    P2 = #checkpair{sid=Sid,is_nominated=Nominated,local=C1,remote=Remote,fid=Fid,cid=Cid},
 		    P2
 	    end,
-	    case dict_find(?VALIDE_LIST,Sid) of
+	    case dict_find(?VALIDLIST_DICT,Sid) of
 		error->
-		    dict_store(?VALIDE_LIST,Sid,ValidPair);
+		    dict_store(?VALIDLIST_DICT,Sid,ValidPair);
 		{ok,V1}->
-		    dict_store(?VALIDE_LIST,Sid,[ValidPair|V1])
+		    dict_store(?VALIDLIST_DICT,Sid,[ValidPair|V1])
 	    end,
-	    update_checklist_state(Sid,Id,?CANDIDATE_SUCCEEDED),
+	    update_pair_state(Sid,Id,?CANDIDATE_SUCCEEDED),
 	    update_pair_states(Sid,Fid),
-	    case do_check_true() of
+	    %%8.1.2
+	    updating_states(Sid),
+	    update_checklist_state(Sid),
+	    case do_check_completed() of
 		true->
 		    reply(Client,ok),
 		    {Server,?AGENT_COMPLETED};
 		
-		_->nochange
+		_->
+		    case {Role,Type} of
+			{?ROLE_CONTROLLING,?AGENT_NOMINATE_REGULAR}->
+			    case is_validlist_completed(Sid) of
+				true->%%todo 
+				    begin_nominated_check;
+				false->
+				    donothing
+			    end;
+			_->
+			    donothing
+		    end
 	    end
     end
 ;
 	
-
 ?AGENT_RUNNING(_From,{udp,Socket,PeerIp,PeerPort,#stun{class = binding,
 						      transactionid = TxId,
-						      method=request,attrs=Attrs}  },#server{role=Role}) ->
-	  
+						      method=request,attrs=Attrs}  },#server{role=Role,client=Client}=Server) ->	  
     {ok,Ip} = inet_parse:address(PeerIp),
     RepAttrs = [{'XOR-PEER-ADDRESS',{Ip,PeerPort}}],
     Rep = #stun{
@@ -436,13 +453,21 @@ rtcp_info(MediaInfo)->
      },
     Stun = stun:encode(Rep),
     gen_udp:send(Socket,Stun),
-
+    PairCandidate = 
+	case proplists:get_value('USE-CANDIDATE',RepAttrs) of
+	    undefined->
+		false;
+	    _->
+		true
+	end,
     %%trigger 
-    L = get(?CHECK_LIST),
+    L =  get(?CHECKLISTS),
+    List1 = lists:foldl(fun({_,A},Acc)->
+				Acc ++ A end,L),
     %%find peer flex
     T1 = lists:filter(fun(#checkpair{remote=Remote})->
 			      #ice_addr{ip=Ip,port=Port}=Remote,
-			      {Ip,Port} =:= {PeerIp,PeerPort} end,L),
+			      {Ip,Port} =:= {PeerIp,PeerPort} end,List1),
     {ok,#socket_info{streams=Streams}} = dict_find(?SOCKET_DICT,Socket),
     case T1 of 
 	[]->
@@ -467,29 +492,66 @@ rtcp_info(MediaInfo)->
 				      ?ROLE_CONTROLLED ->
 					  eis_ice:candiate_pair_priority(Priority,Local#candidate.priority)
 				  end,
-			      Pair = #checkpair{priority=PairPrority,sid=Sid,cid=Cid,remote=C1,local=Local,state=?CANDIDATE_WAITING},
+			      Id = increment(?PAIR_ID),
+			      Pair = #checkpair{id=Id,priority=PairPrority,sid=Sid,cid=Cid,remote=C1,local=Local,state=?CANDIDATE_WAITING},
 			      insert_checkpair(Sid,Pair,Role),
 			      L2 = get(?TRIGGER_QUE),
 			      L3 = L2 ++ [Pair],
 			      put(?TRIGGER_QUE,L3),
+			      case {Role,PairCandidate} of
+				  {?ROLE_CONTROLLED,true}->
+				      dict_store(?PAIR_NOMINATED_DICT,Id,true);
+				  _->
+				      donothing
+			      end,
 			      C1 end,Streams);
 	_->%%7.2.1.4
-	    lists:map(fun(#checkpair{state=State1,id=Id}=Pair)->
+	    lists:map(fun(#checkpair{sid=Sid,state=State1,id=Id}=Pair)->
 			      case State1 of
 				  ?CANDIDATE_SUCCEEDED ->
+				      %%update valid list nominated
+				      case {Role,PairCandidate} of
+					  {?ROLE_CONTROLLED,true}->
+					      {ok,List1} = dict_find(?VALIDLIST_DICT,Sid),
+					      List2  = lists:map(fun(#checkpair{id=Id1}=P1)->
+									 if Id1 =:=Id ->
+										 P1#checkpair{is_nominated=true};
+									    true->
+										 P1 
+									 end end,List1),
+					      dict_store(?VALIDLIST_DICT,Sid,List2);	
+					  
+					  _->
+					   donothing
+				      end,
 				      do_nothing;
 				  A when A=:= ?CANDIDATE_WAITING orelse A=:=?CANDIDATE_FROZEN ->
 				      append_trigger_que(Pair);
 				  ?CANDIDATE_FAILED ->
-				      ok;
+				      update_pair_state(Sid,Id,?CANDIDATE_WAITING),
+				      append_trigger_que(Pair#checkpair{state=?CANDIDATE_WAITING});
 				  ?CANDIDATE_IN_PROGRESS ->
-				      ok
-			      end end,T1)
-		      end,
-    nochange.
-
+				      update_pair_state(Sid,Id,?CANDIDATE_WAITING),
+				      case {Role,PairCandidate} of
+					  {?ROLE_CONTROLLED,true}->
+					      dict_store(?PAIR_NOMINATED_DICT,Id,true);
+					  _->
+					      donothing
+				      end
+			      end,
+			      updating_states(Sid),
+			      update_checklist_state(Sid)
+		      end,T1)
+    end,    
+    case do_check_completed() of
+	true->
+	    reply(Client,ok),
+	    {Server,?AGENT_COMPLETED};	
+	_->nochange
+    end
+	.
 ?AGENT_COMPLETED(From,{send,udp,Sid,Cid,Packet},_Server)->
-    L = get(?VALIDE_LIST),
+    {ok,L} = dict_find(?VALIDLIST_DICT,Sid),
     L1 = lists:filter(fun(#checkpair{cid=Cid1,sid=Sid1})->
 			      Cid =:= Cid1 andalso Sid=:=Sid1 end,L),
     [#checkpair{local=Local,remote=Remote}|_]=L1,
@@ -605,13 +667,13 @@ prioritize(#server{local_media_info=Info}=Server)->
     build_sdp(Server,L5),
     ok.
 
-compare_type({CANDIDATE_TYPE_PREF_RELAYED,_})->
+compare_type({?CANDIDATE_TYPE_PREF_RELAYED,_})->
 	true;
-compare_type({CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE,CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE})->
+compare_type({?CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE,?CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE})->
 	false;
-compare_type({CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE,_})->
+compare_type({?CANDIDATE_TYPE_PREF_SEVER_REFLEXIVE,_})->
 	true;
-compare_type({CANDIDATE_TYPE_PREF_HOST,_})->
+compare_type({?CANDIDATE_TYPE_PREF_HOST,_})->
 	false.
 	
 get_default(L)->
@@ -619,28 +681,25 @@ get_default(L)->
 		compare_type({A#candidate.type,B#candidate.type}) end,L),
 	lists:nth(1,L1).
 										
+choose_default(#server{rtcp=false},L5)->
+    lists:map(fun(A)->
+			  [get_default(A)] end,L5);
 choose_default(#server{},L5)->
-	lists:map(fun(A)->
-				get_default(A) end,L5);
-choose_default(#server{},L5)->
-	lists:map(fun(A)->
-				 A1 = lists:map(fun(#candidate{cid=Cid})->
-								Cid =:=1 end,A),
-				A2 = lists:map(fun(#candidate{cid=Cid})->
-								Cid =:=2 end,A),
-				[get_default(A1),get_default(A2)]
-				 end,L5).			
-
-
-
+    lists:map(fun(A)->
+		      A1 = lists:map(fun(#candidate{cid=Cid})->
+					     Cid =:=1 end,A),
+		      A2 = lists:map(fun(#candidate{cid=Cid})->
+					     Cid =:=2 end,A),
+		      [get_default(A1),get_default(A2)]
+	      end,L5).			
 
 pcall(K,L)->
-	case properlist:get_value(K,L) of
-		undefined->
-		throw({no_key_error,K});
-		V->
-		V
-	end.
+    case properlist:get_value(K,L) of
+	undefined->
+	    throw({no_key_error,K});
+	V->
+	    V
+    end.
 get_streams(#media_info{video=Video,audio=Audio})->
     Streams =   Audio ++Video,
     lists:map(fun(#stream_info{options=Opts},stream_id=Sid)->
@@ -714,7 +773,7 @@ new_addr(Ip,Streams,Rtcp)->
 			     end end ,Streams),
     L1.
 
-new_host_candidate(#stream{sid=Sid,ip=Ip,port=Port,cid=Cid,user=User,pwd=Pwd}=Stream)->   
+new_host_candidate(#stream{sid=Sid,ip=Ip,port=Port,cid=Cid,user=User,pwd=Pwd})->   
     {ok,Ip1} = inet_parse:address(Ip),
     Socket  = 
 	case dict_find(?HOST_SOCKET,{Ip,Port,udp}) of
@@ -779,36 +838,17 @@ list_head(Name,Value)->
 		A
 	end,
     put(Name,[Value|L]).
-
-
-send_check(#server{role=Role,nominate_type=Type},#checkpair{cid=Cid,local=Local,remote=Remote}=P1,Attrs,Sid)->
+%%if Media ValidList have a cid nominated,nominated flag will not set%% see 8.1.2
+send_check(#server{}=Server,#checkpair{sid=Sid,cid=Cid,local=Local,remote=Remote}=P1)->
 	%%peer reflex 
     P = eis_ice:candiate_pair_priority(#candidate{type=?CANDIDATE_TYPE_SEVER_REFLEXIVE,cid=Cid}),
-    A1=
-	case Role of
-	    ?AGENT_ROLE_CONTROLLING->
-		[
-		 {'PRIORITY',P},
-		 {'ICE-CONTROLLING',1}
-		];
-	    _->
-		[
-		 {'PRIORITY',P},
-		 {'ICE-CONTROLLED',1}
-		]
-	end,
+    A1=[{'PRIORITY',P}],
     %%
-    Nominate = case Type of
-	     ?AGENT_NOMINATE_REGULAR ->
-		 {false,[]};
-	     ?AGENT_NOMINATE_AGGRESSIVE->
-		 {true,[{'USE-CANDIDATE',1}]}
-	 end,
     TxId = increment(?TXID),
     #candidate{socket=Socket,user=User} = Local,
     #candidate{addr=Addr,user=PeerUser,pwd=PeerPwd} = Remote,
     A2= [{'USERNAME',PeerUser++":"++User},{'PASSWORD',PeerPwd}],
-    A3 = A1+A2 ++ Attrs,	
+    A3 = A1+A2 ++ get_role_attr(Server)++ get_nominated_attr(Server,P1),	
     #ice_addr{ip = Ip,port = Port} = Addr,
     Req = #stun{
       class = request,
@@ -817,22 +857,19 @@ send_check(#server{role=Role,nominate_type=Type},#checkpair{cid=Cid,local=Local,
       fingerprint = true,
       attrs = A3
      },
-    Pair =P1#checkpair{is_nominated=Nominate},
-    dict_store(?STUN_REQ_TRANS,TxId,#check_info{pair=Pair,sid=Sid,role=Role}),
+    Pair =P1#checkpair{is_nominated=is_nominated(Server,P1)},
+    dict_store(?CHECK_REQ_DICT,TxId,#check_info{pair=Pair,sid=Sid}),
     Stun = stun:encode(Req),
     gen_udp:send(Socket,Ip,Port,Stun),
-    {ok,Ref} = timer(?Ta,{check_rto,Sid,Socket,Ip,Port,Stun}),
+    {ok,Ref} = msg_after(?Ta,{check_rto,Sid,Socket,Ip,Port,Stun}),
     dict_store(?CHECK_RTO_DICT,TxId,#check_rto_info{timer=Ref,count=1,pair=Pair})
 	.
-timer(Time,Msg)->
+msg_after(Time,Msg)->
     timer:send_after(Time,self(),{'$agent',from,Msg}).
 send_interval(?Ta,Pid,Msg)->
     timer:send_interval(?Ta,Pid,{'$agent',from,Msg}).
-%%rfc 7.3.1.2.2
-construct_valid(ListId,Valid)->
-    ok.
-    
 
+    
 %%rfc5245 5.2
 determing_role(#server{action=Action},#media_info{options=Opts})->
 	#sdp_session{attrs=Attrs} = pcall(Opts,sdp_session),
@@ -898,7 +935,7 @@ forming_check_list(#server{role=Role}=_Server,PeerSdp)->
     {ok,Ref} = send_interval(?Ta,Pid,{check,Sid}),
     dict_store(?ACTIVE_CHECKLIST_TIMER,Sid,#checklist_info{timer=Ref}),
     %%init checklist state
-    put(?CHECK_LIST,L5).
+    put(?CHECKLISTS,L5).
 	
 order_pair(L,Role)->					
     L1 = lists:map(fun(#checkpair{local=Local,remote=Remote}=A)-> 
@@ -915,7 +952,7 @@ order_pair(L,Role)->
 %%
 
 computing_state(L)->
-    [First,Tail] = L,
+    [First|Tail] = L,
     L1 = lists:map(fun(#checkpair{cid=Cid}=A)->
 			   case Cid of
 			       1->
@@ -924,44 +961,77 @@ computing_state(L)->
 				   A
 			   end end ,First),
     [L1|Tail].
-order_check(#server{nominate_type=Type}=Server,ListId)->
-    A1 = case Type of
-	     ?AGENT_NOMINATE_REGULAR ->
-		 {false,[]};
-	     ?AGENT_NOMINATE_AGGRESSIVE->
-		 {true,[{'USE-CANDIDATE',1}]}
-	 end,
-    {ListId,L} = proplists:get_value(ListId,get(?CHECK_LIST)),
+order_check(#server{nominate_type=_Type}=Server,Sid)->
+    L = get_checklist_by_sid(Sid),
     L1 = lists:filter(fun(#checkpair{state=State})->
 			      State =:= ?CANDIDATE_WAITING end,L),
     case L1 of
 	[#checkpair{id=Id}=H|_Tail]->
-	    send_check(Server,H,A1,Id),
-	    update_checklist_state(ListId,Id,?CANDIDATE_IN_PROGRESS)
+	    send_check(Server,H),
+	    update_pair_state(Sid,Id,?CANDIDATE_IN_PROGRESS)
 	    ;
 	[]->
 	    L2 = lists:filter(fun(#checkpair{state=State})->
 				      State =:= ?CANDIDATE_FROZEN end,L),
 	    case L2 of
 		[#checkpair{id=Id1}=H1|_Tail1]->
-		    send_check(Server,H1,A1,ListId),
-		    update_checklist_state(ListId,Id1,?CANDIDATE_IN_PROGRESS);
+		    send_check(Server,H1),
+		    update_pair_state(Sid,Id1,?CANDIDATE_IN_PROGRESS);
 		_->
-		    {ok,Timer}= dict_find(?ACTIVE_CHECKLIST_TIMER,ListId),
+		    {ok,Timer}= dict_find(?ACTIVE_CHECKLIST_TIMER,Sid),
 		    timer:cancel(Timer)
 	    end
     end.
 
-trigger_check(#server{nominate_type=Type}=Server,ListId)->
-    A1 = case Type of
-	     ?AGENT_NOMINATE_REGULAR ->
-		 {false,[]};
-	     ?AGENT_NOMINATE_AGGRESSIVE->
-		 {true,[{'USE-CANDIDATE',1}]}
-	 end,
+get_role_attr(#server{role=?ROLE_CONTROLLED})->
+    [{'ICE-CONTROLLED',1}];
+get_role_attr(#server{role=?ROLE_CONTROLLING})->
+    [{'ICE-CONTROLLING',1}].
+
+
+get_nominated_attr(#server{nominate_type=?AGENT_NOMINATE_AGGRESSIVE,role=?ROLE_CONTROLLING},Pair) ->
+    case is_pair_cid_nominated(Pair) of
+	false ->
+	    [{'USE-CANDIDATE',1}
+	    ];
+	true ->
+	    []
+    end;
+get_nominated_attr(_,_)->
+    [].
+
+is_nominated(#server{nominate_type=?AGENT_NOMINATE_AGGRESSIVE,role=?ROLE_CONTROLLING},Pair) ->
+    not is_pair_cid_nominated(Pair)
+	;
+is_nominated(_,_)->
+    false.
+
+is_pair_cid_nominated(#checkpair{id=Id,sid=Sid,cid=Cid})->
+    {ok,L} = dict_find(?VALIDLIST_DICT,Sid),
+    L1 = lists:filter(fun(A)->
+			      A#checkpair.id =:=Id andalso A#checkpair.cid=:=Cid end,L),
+    case L1 of
+	[]->
+	    false;
+	_ ->
+	    true
+    end.
+
+is_pair_cid_prority_less_nominated(#checkpair{priority=P,id=Id,sid=Sid,cid=Cid})->
+    {ok,L} = dict_find(?VALIDLIST_DICT,Sid),
+    L1 = lists:filter(fun(A)->
+			      A#checkpair.id =:=Id andalso A#checkpair.cid=:=Cid andalso A#checkpair.priority>P  end,L),
+    case L1 of
+	[]->
+	    true;
+	_ ->
+	    false
+    end.
+	 
+trigger_check(#server{nominate_type=_Type}=Server,Sid)->
     [#checkpair{id=Id}=H|T] = get(?TRIGGER_QUE),
-    send_check(Server,H,A1,Id),
-    update_checklist_state(ListId,Id,?CANDIDATE_IN_PROGRESS),
+    send_check(Server,H),
+    update_pair_state(Sid,Id,?CANDIDATE_IN_PROGRESS),
     put(?TRIGGER_QUE,T).
 
 
@@ -971,8 +1041,8 @@ not_role(?ROLE_CONTROLLING)->
 	?ROLE_CONTROLLED.	
 
 
-update_checklist_state(ListId,Id,State)->
-    L = get(?CHECK_LIST), 
+update_pair_state(Sid,Id,State)->
+    L = get_checklist_by_sid(Sid), 
     L1 = lists:map(fun(#checkpair{id=Id1}=A)->
 			   case Id of
 			       Id1 ->
@@ -980,9 +1050,10 @@ update_checklist_state(ListId,Id,State)->
 			       _->
 				   A
 			   end end ,L),
-    dict_store(?CHECKLIST_STATE_DICT,ListId,get_checklist_state(L)),
-    L2 = lists:keyreplace(ListId,1,L,{ListId,L1}),
-    put(?CHECK_LIST,L2).
+    update_checklist_by_sid(Sid,L1).
+
+update_checklist_state(Sid)->
+    dict_store(?CHECKLIST_STATE_DICT,Sid,get_checklist_state(Sid)).
 
 lists_find(_Cid,[])->
     false;
@@ -990,11 +1061,18 @@ lists_find(H,[H|_T]) ->
     true;
 lists_find(Cid,[_H|T]) ->
     lists_find(Cid,T).
-get_checklist_state(L)->
+
+is_validlist_completed(Sid)->
+    L1 = get_checklist_by_sid(Sid),
+    {ok,L2} = dict_find(?VALIDLIST_DICT,Sid),
+    lists:foldl(fun(#checkpair{cid=Cid},Acc)->
+			Acc andalso lists_find(Cid,L2) end,true,L1).
+get_checklist_state(Sid)->
+    L = get_checklist_by_sid(Sid),
     L1 = lists:filter(fun(#checkpair{state=State})->
 			      State=:=?CANDIDATE_SUCCEEDED orelse State=:=?CANDIDATE_FAILED end,L),
     if length(L1) =:= length(L) ->
-	    L2 = get(?VALIDE_LIST),
+	    {ok,L2} = dict_find(?VALIDLIST_DICT,Sid),
 	    R = lists:foldl(fun(#checkpair{cid=Cid},Acc)->
 				    Acc andalso lists_find(Cid,L2) end,true,L1),
 	    if R ->
@@ -1029,14 +1107,13 @@ checklist_type(L)->
     end.
 		
 insert_checkpair(Sid,Pair,Role)->
-    L1 = get(?CHECK_LIST),
+    L1 = get_checklist_by_sid(Sid),
     {_,L2} = proplists:get_value(Sid,L1),
-    L3 = [L2|L1],
+    L3 = [Pair|L2],
     L4 = order_pair(L3,Role),
-    L5=lists:keyreplace(Sid,1,L1,{Sid,L4}),
-    put(?CHECK_LIST,L5).
+    update_checklist_by_sid(Sid,L4).
 update_same_foundation_frozen_2_waiting(Sid,Fid,L)->
-    L1 = get(?CHECK_LIST),
+    L1 = get_checklist_by_sid(Sid),
     L2 = lists:map(fun(#checkpair{fid=F1,state=State}=A)->
 			   case {Fid,?CANDIDATE_FROZEN} of
 			       {F1,State} ->
@@ -1044,11 +1121,12 @@ update_same_foundation_frozen_2_waiting(Sid,Fid,L)->
 			       _ ->
 				   A end end,L),
     L3=lists:keyreplace(Sid,1,L1,{Sid,L2}),
-    put(?CHECK_LIST,L3).
+    update_checklist_by_sid(Sid,L3).
 %%7.1.3.2.3
 update_pair_states(Sid,Fid)->
-    L = get(?CHECK_LIST),
-    {_,L1} = proplists:get_value(Sid,L),
+    L = get(?CHECKLISTS),
+    L1 = get_checklist_by_sid(Sid),
+
     update_same_foundation_frozen_2_waiting(Sid,Fid,L1),
     L4 = lists:filter(fun({T,_})->
 			      T =/=Sid end,L),
@@ -1068,13 +1146,8 @@ update_pair_states(Sid,Fid)->
 		      end end,L4)
 	.
 
-update(Sid,List)->
-    L = get(?CHECK_LIST),
-    L1 = lists:keyreplace(Sid,1,L,{Sid,List}),
-    put(?CHECK_LIST,L1).
-
-do_check_false()->
-    L = get(?CHECK_LIST),
+do_check_failed()->
+    L = get(?CHECKLISTS),
     R = lists:foldl(fun({Sid,_},Acc)->
 			    {ok,S}=dict_find(?CHECKLIST_STATE_DICT,Sid),
 			    case S of
@@ -1085,8 +1158,8 @@ do_check_false()->
 			    end end,true,L),
     not R.
 
-do_check_true()->
-    L = get(?CHECK_LIST),
+do_check_completed()->
+    L = get(?CHECKLISTS),
     L2 = lists:filter(fun({Sid,_})->
 			    {ok,S}=dict_find(?CHECKLIST_STATE_DICT,Sid),
 			    case S of
@@ -1097,3 +1170,47 @@ do_check_true()->
 			    end end,L),
     length(L2) =:=length(L).
     
+
+append_trigger_que(#checkpair{id=Id}=Pair)->
+    L = get(?TRIGGER_QUE),
+    L1 = lists:filter(fun(#checkpair{id=Id1})->
+			      Id =:= Id1 end,L),
+    case L1 of
+	[] ->
+	    L2 = L ++ [Pair],put(?TRIGGER_QUE,L2);
+	_ ->
+	    ok
+    end.
+
+get_checklist_by_sid(Sid)->
+    {Sid,L} = proplists:get_value(Sid,get(?CHECKLISTS)),
+    L.
+update_checklist_by_sid(Sid,L)->
+    L1 = get(?CHECKLISTS),
+    L2=lists:keyreplace(Sid,1,L1,{Sid,L}),
+    put(?CHECKLISTS,L2).
+
+updating_states(Sid)->
+    {ok,L}= dict_find(?VALIDLIST_DICT,Sid),
+    L1 = lists:filter(fun(#checkpair{is_nominated=T})->
+			 T end,L),
+    case L1 of
+	[]->
+	    donothing;
+	_->
+	    lists:map(fun(#checkpair{sid=Sid2,cid=Cid})->
+			      D = get(?CHECK_REQ_DICT),
+			      L2 = dict:to_list(D),
+			      L3 = lists:filter(fun({_Txid,#checkpair{sid=Sid1,cid=Cid1}})->
+							Sid1 =:=Sid2 andalso Cid1 =:= Cid end,L2),
+			      lists:map(fun(Txid,Pair)->
+						case is_pair_cid_prority_less_nominated(Pair) of
+						    false->
+							nothing;
+						    true->
+							dict_store(?CHECK_REQ_DICT,Txid,Pair#checkpair{is_nominated=false})
+						end end ,L3),
+			      ok end,L1)
+    end
+	.
+
