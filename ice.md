@@ -2,7 +2,7 @@ rfc5245
 ========
 
 #状态图#
-!状态图(img/state.jpg "rfc5245状态图")
+![状态图](https://github.com/xinmingyao/eiserver/blob/master/img/rfc5245.GIF "rfc5245状态图")
 
 #数据结构:
 ##checklist:
